@@ -1,0 +1,236 @@
+INDEX_LIST = ["N225",   # Nikkei 225, Japan
+               "HSI",   # Hang Seng, Hong Kong
+               "AORD",  # All Ords, Australia
+               "STI",   # STI Index, Singapore
+               "GDAXI", # DAX, German
+               "FTSE",  # FTSE 100, UK
+               "DJI",   # Dow, US
+               "GSPC",  # S&P 500, US
+               "IXIC",  # NASDAQ, US
+               "NYA",
+               "RTS",
+               "BVSP"]  # BOVESPA, Brazil
+
+
+import numpy as np
+import pandas as pd
+import os
+import urllib.request
+import matplotlib
+import tensorflow as tf
+
+class StockData(object):
+    def __init__(self):
+        self.basedir = "./data/"
+        if not os.path.exists(self.basedir):
+            os.mkdir(self.basedir)
+        self.baseurl = r"http://real-chart.finance.yahoo.com/table.csv?ignore=.csv&s=%5E"
+
+
+    def download(self):
+        # Download historical data for major markets
+        for index in INDEX_LIST:
+            filename = self.basedir + index + ".csv"
+            url = self.baseurl + index
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url)) as response:
+                    message = response.read()
+                    with open(filename, "wb") as f:
+                        f.write(message)
+            except:
+                print("Error:", url)
+
+    def get_closing_data(self, days=1000, normalize=False, logreturn=False):
+        """ Get closing data for indecis.
+
+        If days is given, return the data for last <days> days.
+        If normalize is set to True, then closing value is normalized during the period.
+        :type days: int
+        :type normalize: bool
+        :type logreturn: bool
+        :rtype: pandas.DataFrame
+        """
+        closing_data = pd.DataFrame()
+        for index in INDEX_LIST:
+            df = pd.read_csv(self.basedir + index + ".csv").set_index("Date")
+            closing_data[index] = df["Close"][:days] if days else df["Close"]
+
+        # Reverse the dataframe as CSV contains data in desc order
+        # Also, fill empty cells by fillna method
+        closing_data = closing_data.fillna(method="ffill")[::-1].fillna(method="ffill")
+
+        # Normalizations
+        for index in INDEX_LIST:
+            if normalize:
+                closing_data[index] = closing_data[index] / max(closing_data[index])
+            if logreturn:
+                closing_data[index] = np.log(closing_data[index] / closing_data[index].shift())
+        return closing_data
+
+
+
+
+
+
+s = StockData()
+s.download()
+closing_data = s.get_closing_data(1200, True, True)
+
+closing_data["N225_positive"] = 0
+closing_data.ix[closing_data["N225"] >= 0, "N225_positive"] = 1
+closing_data["N225_negative"] = 0
+closing_data.ix[closing_data["N225"] < 0, "N225_negative"] = 1
+
+training_test_data = pd.DataFrame(
+    # column name is "<index>_<day>".
+    # E.g., "DJI_1" means yesterday's Dow.
+    columns= ["N225_positive", "N225_negative"] + [s + "_1" for s in INDEX_LIST[1:]]
+)
+
+for i in range(7, len(closing_data)):
+    data = {}
+    # We will use today's data for positive/negative labels
+    data["N225_positive"] = closing_data["N225_positive"].ix[i]
+    data["N225_negative"] = closing_data["N225_negative"].ix[i]
+    # Use yesterday's data for world market data
+    for col in INDEX_LIST[1:]:
+        data[col + "_1"] = closing_data[col].ix[i - 1]
+    training_test_data = training_test_data.append(data, ignore_index=True)
+
+predictors_tf = training_test_data[training_test_data.columns[2:]]
+classes_tf = training_test_data[training_test_data.columns[:2]]
+
+training_set_size = int(len(training_test_data) * 0.8)
+test_set_size = len(training_test_data) - training_set_size
+
+training_predictors_tf = predictors_tf[:training_set_size]
+training_classes_tf = classes_tf[:training_set_size]
+test_predictors_tf = predictors_tf[training_set_size:]
+test_classes_tf = classes_tf[training_set_size:]    
+    
+    
+sess = tf.Session()    
+num_predictors = len(training_predictors_tf.columns)
+num_classes = len(training_classes_tf.columns)
+
+feature_data = tf.placeholder("float", [None, num_predictors])
+actual_classes = tf.placeholder("float", [None, num_classes])    
+
+
+
+weights1 = tf.Variable(tf.truncated_normal([11, 50], stddev=0.0001))
+biases1 = tf.Variable(tf.ones([50]))
+
+weights2 = tf.Variable(tf.truncated_normal([50, 25], stddev=0.0001))
+biases2 = tf.Variable(tf.ones([25]))
+
+weights3 = tf.Variable(tf.truncated_normal([25, 2], stddev=0.0001))
+biases3 = tf.Variable(tf.ones([2]))
+
+# This time we introduce a single hidden layer into our model...
+hidden_layer_1 = tf.nn.relu(tf.matmul(feature_data, weights1) + biases1)
+hidden_layer_2 = tf.nn.relu(tf.matmul(hidden_layer_1, weights2) + biases2)
+model = tf.nn.softmax(tf.matmul(hidden_layer_2, weights3) + biases3)
+
+
+
+
+cost = -tf.reduce_sum(actual_classes*tf.log(model))
+
+training_step = tf.train.AdamOptimizer(learning_rate=0.0001).minimize(cost)
+
+init = tf.global_variables_initializer()
+sess.run(init)
+
+
+
+
+
+for i in range(1, 30001):
+  sess.run(
+    training_step,
+    feed_dict={
+      feature_data: training_predictors_tf.values,
+      actual_classes: training_classes_tf.values.reshape(len(training_classes_tf.values), 2)
+    }
+  )
+
+
+
+def tf_confusion_metrics(model, actual_classes, session, feed_dict):
+  predictions = tf.argmax(model, 1)
+  actuals = tf.argmax(actual_classes, 1)
+
+  ones_like_actuals = tf.ones_like(actuals)
+  zeros_like_actuals = tf.zeros_like(actuals)
+  ones_like_predictions = tf.ones_like(predictions)
+  zeros_like_predictions = tf.zeros_like(predictions)
+
+  tp_op = tf.reduce_sum(
+    tf.cast(
+      tf.logical_and(
+        tf.equal(actuals, ones_like_actuals), 
+        tf.equal(predictions, ones_like_predictions)
+      ), 
+      "float"
+    )
+  )
+
+  tn_op = tf.reduce_sum(
+    tf.cast(
+      tf.logical_and(
+        tf.equal(actuals, zeros_like_actuals), 
+        tf.equal(predictions, zeros_like_predictions)
+      ), 
+      "float"
+    )
+  )
+
+  fp_op = tf.reduce_sum(
+    tf.cast(
+      tf.logical_and(
+        tf.equal(actuals, zeros_like_actuals), 
+        tf.equal(predictions, ones_like_predictions)
+      ), 
+      "float"
+    )
+  )
+
+  fn_op = tf.reduce_sum(
+    tf.cast(
+      tf.logical_and(
+        tf.equal(actuals, ones_like_actuals), 
+        tf.equal(predictions, zeros_like_predictions)
+      ), 
+      "float"
+    )
+  )
+
+  tp, tn, fp, fn = \
+    session.run(
+      [tp_op, tn_op, fp_op, fn_op], 
+      feed_dict
+    )
+
+  tpr = float(tp)/(float(tp) + float(fn))
+  fpr = float(fp)/(float(tp) + float(fn))
+
+  accuracy = (float(tp) + float(tn))/(float(tp) + float(fp) + float(fn) + float(tn))
+
+  recall = tpr
+  precision = float(tp)/(float(tp) + float(fp))
+  
+  f1_score = (2 * (precision * recall)) / (precision + recall)
+  
+  print ('Precision = ', precision)
+  print ('Recall = ', recall)
+  print ('F1 Score = ', f1_score)
+  print ('Accuracy = ', accuracy)
+
+feed_dict= {
+  feature_data: test_predictors_tf.values,
+  actual_classes: test_classes_tf.values.reshape(len(test_classes_tf.values), 2)
+}
+
+tf_confusion_metrics(model, actual_classes, sess, feed_dict)
+
