@@ -36,7 +36,6 @@ Ubuntu16.04
     $ git clone https://github.com/ryusato2/fi.py-code
 
 
-    $ git clone https://github.com/ryusato2/fi.py-code
 ## その他
 
 ・INDEX_LISTに南アフリカ、インドネシア、ニュージーランドのデータも入れてみると面白いかも  
